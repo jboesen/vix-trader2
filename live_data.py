@@ -1,4 +1,5 @@
-import websocket, json
+import websocket
+import json
 from config import *
 from trade import trade
 from queue import Queue
@@ -22,4 +23,3 @@ def on_message(ws, message):
 socket = "wss://stream.data.alpaca.markets/v2/iex"
 ws = websocket.WebSocketApp(socket, on_open=on_open, on_message=trade)
 ws.run_forever()
-pass
