@@ -1,169 +1,153 @@
-#%%
-import datetime as dt
-from IPython.display import display
 import json
-import matplotlib as mpl
-import matplotlib.pyplot as plt
-import numpy as np
-import pandas as pd
 import requests
-import requests.api
 import websocket
+import pandas as pd
 from collections import deque
-from sklearn.linear_model import LinearRegression
 from threading import Thread
 from time import sleep
-from config import *
 from scipy.stats import norm
+from config import KEY, SECRET, ACCOUNT_URL, BASE_URL, DATA_URL, keys
 
+# Constants for statistical calculations
 STD = 5.511435523209041
 MEAN = 22.671190456349215
-# initialize
-is_open = True
-# initialize current price queue
-current_prices = deque([], maxlen=10)
-# connect and authenticate to regular
-account = json.loads(requests.get(ACCOUNT_URL, headers=keys).content)
-if not account['status'] == 'ACTIVE':
-    exit(1)
-# 1 = longing, 2 = shorting, 3 = hard shorting
+
+# Initialize variables
+is_market_open = True
+current_prices = deque(maxlen=10)
 prev_order = ''
-# Prevent trying to trade before the previous trade is done
 trading = False
 
-def on_open(ws):
-    login = {'action': 'auth', 'key': f'{KEY}', 'secret': f'{SECRET}'}
-    ws.send(json.dumps(login))
-    # one-minute bars
-    listen_message = {'action': 'subscribe', 'bars':['VIX']}
-    ws.send(json.dumps(listen_message))
+# Authenticate the account
+response = requests.get(ACCOUNT_URL, headers=keys)
+account = response.json()
+if account.get('status') != 'ACTIVE':
+    print("Account is not active. Exiting.")
+    exit(1)
 
+def on_open(ws):
+    login_message = {
+        'action': 'auth',
+        'key': KEY,
+        'secret': SECRET
+    }
+    ws.send(json.dumps(login_message))
+    subscribe_message = {
+        'action': 'subscribe',
+        'bars': ['VIX']
+    }
+    ws.send(json.dumps(subscribe_message))
 
 def on_message(ws, message):
-    bar = json.loads(message)[0]
-    avg = (bar['o'] + bar['l']) / 2
-    current_prices.append(avg)
-    if not trading:
-        Thread(target=trade, args=("VXX", )).start()
-
+    global current_prices
+    global trading
+    try:
+        data = json.loads(message)
+        if data and isinstance(data, list):
+            bar = data[0]
+            avg_price = (bar.get('o', 0) + bar.get('l', 0)) / 2
+            current_prices.append(avg_price)
+            if not trading:
+                Thread(target=trade, args=("VXX",)).start()
+    except Exception as e:
+        print(f"Error processing message: {e}")
 
 def liquidate():
-    # cancel open orders
-    print("liquidating")
-    open_orders = requests.get(f"{BASE_URL}/orders", headers=keys).text
+    print("Liquidating positions...")
+    # Cancel open orders
+    open_orders_response = requests.get(f"{BASE_URL}/orders", headers=keys)
+    open_orders = open_orders_response.json()
     if open_orders:
         requests.delete(f"{BASE_URL}/orders", headers=keys)
-    # get all positions
-    positions = json.loads(requests.get(f"{BASE_URL}/positions", headers=keys).text)
-    df = pd.DataFrame(positions)
-    # is this the right way to iterate?
-    for r in df.to_dict(orient="records"):
-        if r['side'] == 'long':
-            print(f"selling {r['symbol']}")
-            payload = {
-                'symbol' : r['symbol'],
-                'qty' : r['qty'],
-                'side' : 'sell',
-                'type' : 'market', 
-                'time_in_force' : 'day',
-            }
-            requests.post(f"{BASE_URL}/orders", headers=keys, json=payload)
-        if r['side'] == 'short':
-            print(f"buying {r['symbol']}")
-            payload = {
-                'symbol' : r['symbol'],
-                'qty' : r['qty'],
-                'side' : 'buy',
-                'type' : 'market', 
-                'time_in_force' : 'day',
-            }
-            requests.post(f"{BASE_URL}/orders", headers=keys, json=payload)
-            # print(receipt.text)
-    for i in range(5):
-        sleep(2)
-        positions = json.loads(requests.get(f"{BASE_URL}/positions", headers=keys).text)
-        print(positions)
-        if not positions:
-            print("liquidating successful")
-            return
-    # restart
-    print("calling main")
-    __main__()
 
+    # Get all positions
+    positions_response = requests.get(f"{BASE_URL}/positions", headers=keys)
+    positions = positions_response.json()
+    if positions:
+        for position in positions:
+            side = position.get('side')
+            symbol = position.get('symbol')
+            qty = position.get('qty')
+            if side == 'long':
+                print(f"Selling {symbol}")
+                submit_order(symbol, qty, 'sell')
+            elif side == 'short':
+                print(f"Buying {symbol}")
+                submit_order(symbol, qty, 'buy')
+
+    # Wait until all positions are liquidated
+    for _ in range(5):
+        sleep(2)
+        positions_response = requests.get(f"{BASE_URL}/positions", headers=keys)
+        positions = positions_response.json()
+        if not positions:
+            print("Liquidation successful")
+            return
+    print("Positions not fully liquidated, attempting again")
+
+def submit_order(symbol, qty, side):
+    order_payload = {
+        'symbol': symbol,
+        'qty': qty,
+        'side': side,
+        'type': 'market',
+        'time_in_force': 'day'
+    }
+    response = requests.post(f"{BASE_URL}/orders", headers=keys, json=order_payload)
+    print(f"Order response: {response.text}")
+
+def submit_notional_order(symbol, notional, side):
+    order_payload = {
+        'symbol': symbol,
+        'notional': str(notional),
+        'side': side,
+        'type': 'market',
+        'time_in_force': 'day'
+    }
+    response = requests.post(f"{BASE_URL}/orders", headers=keys, json=order_payload)
+    print(f"Order response: {response.text}")
 
 def trade(symbol):
-    print("top of trade")
     global trading
+    global prev_order
     trading = True
-    r = requests.get(f"{BASE_URL}/account", headers=keys)
-    # store cash for later
-    cash = float(json.loads(r.text)['cash']) 
-    print(f"cash: {cash}")
-    print("done checking on account...")
-    
-    # get vix price
-    if is_open:
-        global prev_order
-        # get data from past year
-        r = requests.get(f"{DATA_URL}/stocks/{symbol}/bars", params=payload, headers=keys)
-        # we now have a list of bars
+    print("Starting trade process...")
 
-        # predict data for right now
-        # print("got slope prediction")
-        p = current_prices[-1]
+    # Get account cash balance
+    account_response = requests.get(f"{BASE_URL}/account", headers=keys)
+    account_data = account_response.json()
+    cash = float(account_data.get('cash', 0))
+    print(f"Available cash: {cash}")
 
-        percentile = norm.cdf(p, loc=MEAN, scale=STD)
-        above_threshold = percentile > .75
-        below_threshold = percentile < .25
+    if is_market_open and current_prices:
+        latest_price = current_prices[-1]
+        percentile = norm.cdf(latest_price, loc=MEAN, scale=STD)
+        above_threshold = percentile > 0.75
+        below_threshold = percentile < 0.25
 
         if above_threshold and prev_order != 'vix short':
             liquidate()
-            payload = {
-                'symbol' : 'XSD',
-                'notional' : cash,
-                'side' : 'buy',
-                'type' : 'market', 
-                'time_in_force' : 'day',
-                }
-            order = requests.post(f"{BASE_URL}/orders", headers=keys, json=payload)
+            submit_notional_order('XSD', cash, 'buy')
             prev_order = 'vix short'
             trading = False
             return
-        # if current price is below predicted, long it
-        # I have no idea here, but this would be assuming low price regresses to the mean within a day
-        # (4 15-min intervals/hour * 8 hours/day)
-        if below_threshold and prev_order != 'vix long':
-            print("going long")
+
+        elif below_threshold and prev_order != 'vix long':
+            print("Executing VIX long position")
             liquidate()
-            payload = {
-                'symbol' : 'VXX',
-                'notional' : str(cash),
-                'side' : 'buy',
-                'type' : 'market', 
-                'time_in_force' : 'day',
-                }
-            order = requests.post(f"{BASE_URL}/orders", headers=keys, json=payload)
+            submit_notional_order('VXX', cash, 'buy')
             prev_order = 'vix long'
             trading = False
             return
 
-        if prev_order != 'general long':
+        elif prev_order != 'general long':
             liquidate()
-            payload = {
-                'symbol' : 'VOO',
-                'notional' : str(cash),
-                'side' : 'buy',
-                'type' : 'market', 
-                'time_in_force' : 'day',
-                }
-            order = requests.post(f"{BASE_URL}/orders", headers=keys, json=payload)
+            submit_notional_order('VOO', cash, 'buy')
             prev_order = 'general long'
             trading = False
             return
-        trading = False
-        # TODO: change this as needed
-        sleep(30)
 
+    trading = False
 
 def __main__():
     socket = "wss://stream.data.alpaca.markets/v2/iex"
