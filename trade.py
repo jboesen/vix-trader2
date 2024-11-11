@@ -24,7 +24,6 @@ is_open = True
 current_prices = deque([], maxlen=10)
 # connect and authenticate to regular
 account = json.loads(requests.get(ACCOUNT_URL, headers=keys).content)
-# print(account)
 if not account['status'] == 'ACTIVE':
     exit(1)
 # 1 = longing, 2 = shorting, 3 = hard shorting
@@ -33,7 +32,6 @@ prev_order = ''
 trading = False
 
 def on_open(ws):
-    print("opened")
     login = {'action': 'auth', 'key': f'{KEY}', 'secret': f'{SECRET}'}
     ws.send(json.dumps(login))
     # one-minute bars
@@ -42,11 +40,9 @@ def on_open(ws):
 
 
 def on_message(ws, message):
-    print(message)
     bar = json.loads(message)[0]
     avg = (bar['o'] + bar['l']) / 2
     current_prices.append(avg)
-    print(f"trading: {trading}")
     if not trading:
         Thread(target=trade, args=("VXX", )).start()
 
@@ -121,7 +117,6 @@ def trade(symbol):
         below_threshold = percentile < .25
 
         if above_threshold and prev_order != 'vix short':
-            print("going for short...")
             liquidate()
             payload = {
                 'symbol' : 'XSD',
@@ -131,7 +126,6 @@ def trade(symbol):
                 'time_in_force' : 'day',
                 }
             order = requests.post(f"{BASE_URL}/orders", headers=keys, json=payload)
-            # print(order.text)
             prev_order = 'vix short'
             trading = False
             return
@@ -149,13 +143,11 @@ def trade(symbol):
                 'time_in_force' : 'day',
                 }
             order = requests.post(f"{BASE_URL}/orders", headers=keys, json=payload)
-            # print(order.text)
             prev_order = 'vix long'
             trading = False
             return
 
         if prev_order != 'general long':
-            print("chillin w voo")
             liquidate()
             payload = {
                 'symbol' : 'VOO',
@@ -165,11 +157,9 @@ def trade(symbol):
                 'time_in_force' : 'day',
                 }
             order = requests.post(f"{BASE_URL}/orders", headers=keys, json=payload)
-            # print(order.text)
             prev_order = 'general long'
             trading = False
             return
-        print("Chilling because none of the conditions were met")
         trading = False
         # TODO: change this as needed
         sleep(30)
